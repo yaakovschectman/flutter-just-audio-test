@@ -38,7 +38,7 @@ const int _kRIFF = 0x52494646; // "RIFF"
 const int _kWAVE = 0x57415645; // "WAVE"
 const int _kfmt_ = 0x666d7420; // "fmt "
 const int _kdata = 0x64617461; // "data"
-const int _kMaxSize = 44100;
+const int _kMaxSize = 0x7fffffff;
 const int _kWavHeaderSize = 44;
 
 // Generate a WAV header for a much-too-long file, as length may be unknown ahead of time, or infinite
@@ -66,27 +66,36 @@ class StreamingSource extends StreamAudioSource {
 
   StreamingSource([this.frequency = 440]);
 
-  @override
-  Future<StreamAudioResponse> request([int? start, int? end]) async {
-    int t0 = start ?? 0;
-    int nSecs = 1;
-    int t1 = end ?? (_sampleRate * nSecs + _kWavHeaderSize);
-    int len = t1 - t0;
-    print('Requesting $start to $end, returning data of $len long.');
-    assert(len >= _kWavHeaderSize);
+  List<int> generate(int start, int end) {
+    bool hasHeader = start == 0;
+    int len = end - start + (hasHeader ? _kWavHeaderSize : 0);
     Uint8List data = Uint8List(len);
-    int endOfHeader = _writeWavHeader(data.buffer.asByteData(), _sampleRate, 1, 1);
+    int endOfHeader = start == 0 ? _writeWavHeader(data.buffer.asByteData(), _sampleRate, 1, 1) : 0;
     for (int i = 0; i < data.length - endOfHeader; i++) {
       double samp = sin(i * 2 * pi * frequency / _sampleRate) * 0.5 + 0.5;
       data[endOfHeader + i] = (samp * 255).toInt();
     }
+    print('Generating data of length $len');
+    return data;
+  }
+
+  @override
+  Future<StreamAudioResponse> request([int? start, int? end]) async {
+    // I expect that this should be called when the player starts, and because it supports range requests,
+    // gives null for the source length, and has a wave header with a longer length than the response,
+    // it should receive subsequent range requests for the rest of the sound,
+    // but in reality in receives only the initial request.
+    int t0 = start ?? 0;
+    int nSecs = 1;
+    int t1 = end ?? (_sampleRate * nSecs + _kWavHeaderSize);
+    print('Request for $start to $end');
     return StreamAudioResponse(
       sourceLength: null,
       contentLength: null,
       offset: null,
-      stream: Stream.fromIterable([data]),
+      stream: Stream.fromIterable([generate(t0, t1)]),
       contentType: 'audio/wav',
-      rangeRequestsSupported: false,
+      rangeRequestsSupported: true,
       );
   }
 
@@ -110,9 +119,14 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _playTone() async {
+    // I expect that once this is called once, the tone will continue to play,
+    // but increase in frequency almost immediately upon subsequent calls.
     _source.frequency *= pow(2.0, 1.0/12);
+
+    // Ended up needing these two lines just to get the tone to play again on the 2nd press.
     await _player.stop();
-    await _player.seek(Duration.zero); // Stop and seek necesssary to request audio again
+    await _player.seek(Duration.zero);
+
     await _player.play();
   }
 
